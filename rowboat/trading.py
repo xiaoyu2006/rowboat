@@ -8,12 +8,14 @@ Trend-following stragedy:
 - Vice versa for short positions.
 """
 
+from multiprocessing.connection import Client
 import time
 import logging
 from typing import Literal, Tuple
 from decimal import Decimal
 
 from binance.um_futures import UMFutures
+from binance.error import ClientError
 
 from .config import Configuration
 
@@ -155,7 +157,6 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                     "stopPrice": long_exit,
                     "closePosition": True,
                 }
-                logger.info(trade_params)
                 rest_client.new_order(**trade_params)
                 logger.info("SL updated.")
             case "SHORT":
@@ -202,7 +203,33 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                 }
                 logger.debug(long_entry_stop_market_params)
                 logger.debug(short_entry_stop_market_params)
-                rest_client.new_order(**long_entry_stop_market_params)
-                rest_client.new_order(**short_entry_stop_market_params)
+                try:
+                    rest_client.new_order(**long_entry_stop_market_params)
+                except ClientError as e:
+                    if e.error_code == -2021:  # Order will trigger immediately
+                        market_buy_params = {
+                            "symbol": symbol,
+                            "side": "BUY",
+                            "type": "MARKET",
+                            "quantity": open_qty,
+                        }
+                        logger.info(market_buy_params)
+                        rest_client.new_order(**market_buy_params)
+                        continue
+                    logger.error(e)
+                try:
+                    rest_client.new_order(**short_entry_stop_market_params)
+                except ClientError as e:
+                    if e.error_code == -2021:
+                        market_sell_params = {
+                            "symbol": symbol,
+                            "side": "SELL",
+                            "type": "MARKET",
+                            "quantity": open_qty,
+                        }
+                        logger.info(market_sell_params)
+                        rest_client.new_order(**market_sell_params)
+                        continue
+                    logger.error(e)
                 logger.info("Orders updated.")
         time.sleep(15)
