@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "rowboat"
+version = "0.0.0"
+description = "Binance trend-following trading bot."
+authors = ["Yi Cao <me@ycao.top>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+environ-config = "^23.2.0"
+binance-futures-connector = "^4.0.0"
+rich = "^13.6.0"
+
+
+[tool.poetry.group.dev.dependencies]
+pylint = "^3.0.2"
+black = "^23.11.0"
+mypy = "^1.6.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+rowboat = "rowboat.__main__:main"
