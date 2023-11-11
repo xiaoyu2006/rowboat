@@ -25,3 +25,4 @@ class Configuration:
         self.enter_more_after_break_bars: int = int(
             config["trading"]["enter_more_after_break_bars"]
         )
+        self.interval: str = config["trading"]["interval"]

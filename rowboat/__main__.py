@@ -32,6 +32,7 @@ def process_config(config_file) -> Configuration:
             "each_trade": "0.05",
             "enter_more_after_break_bars": "8",
             "max_per_symbol": "0.5",
+            "interval": "1d",
         }
         with open(config_file, "w", encoding="utf-8") as f:
             config.write(f)
@@ -49,8 +50,8 @@ def start_trading(config: Configuration):
     client = UMFutures(config.api_key, config.api_secret, base_url=config.rest_endpoint)
     account = client.account()
     exchange_info = client.exchange_info()
-    LOGGER.info({i: account[i] for i in account if i != "positions"})
-    LOGGER.info({i: exchange_info[i] for i in exchange_info if i != "symbols"})
+    LOGGER.debug({i: account[i] for i in account if i != "positions"})
+    LOGGER.debug({i: exchange_info[i] for i in exchange_info if i != "symbols"})
     threads = []
     for s in config.symbols:
         t = threading.Thread(

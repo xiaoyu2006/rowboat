@@ -19,12 +19,12 @@ from .config import Configuration
 
 
 def get_entry_exit_price(
-    symbol: str, rest_client: UMFutures, entry_int: int, exit_int: int
+    symbol: str, rest_client: UMFutures, entry_int: int, exit_int: int, interval: str = "1d"
 ) -> Tuple[Decimal, Decimal, Decimal, Decimal]:
     "Returns (long_entry, long_exit, short_entry, short_exit)"
     bars_to_fetch = max(entry_int, exit_int) + 1  # add 1 to omit latest bar
     bars = rest_client.mark_price_klines(
-        symbol=symbol, interval="1d", limit=bars_to_fetch
+        symbol=symbol, interval=interval, limit=bars_to_fetch
     )
     # Response example:
     # [
@@ -53,7 +53,7 @@ def get_entry_exit_price(
 Direction = Literal["LONG", "SHORT", "NONE"]
 
 
-def infer_position(account_dict, position_dict) -> Tuple[Direction, Decimal]:
+def infer_position(position_dict) -> Tuple[Direction, Decimal]:
     """
     Since the program itself doesn't hold any state, it needs to infer the current position from the account info.
     Returns: (direction, investment in USDT)
@@ -61,7 +61,7 @@ def infer_position(account_dict, position_dict) -> Tuple[Direction, Decimal]:
     amount = Decimal(position_dict["positionAmt"])  # Calculated in COIN
 
     if amount == 0:
-        return "NONE", 0
+        return "NONE", Decimal(0)
     if amount > 0:
         return "LONG", Decimal(position_dict["initialMargin"])
     return "SHORT", Decimal(position_dict["initialMargin"])
@@ -79,6 +79,7 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
     exit = config.exit
     each_trade = config.each_trade
     max_position = config.max_per_symbol  # Portion of the total account balance
+    interval = config.interval
     enter_more_after_break_bars = config.enter_more_after_break_bars
     logger = logging.getLogger(symbol)
     info = rest_client.exchange_info()
@@ -90,13 +91,13 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
         return
     price_percision = int(symbol_info["pricePrecision"])  # Percision: 10e-x
     qty_percision = int(symbol_info["quantityPrecision"])  # Percision: 10e-x
-    logger.info(symbol_info)
+    logger.debug(symbol_info)
     # Set leverage to 1x
     rest_client.change_leverage(symbol=symbol, leverage=1)
     logger.info("Leverage set to 1x.")
     while True:
         long_entry, long_exit, short_entry, short_exit = get_entry_exit_price(
-            symbol, rest_client, entry, exit
+            symbol, rest_client, entry, exit, interval
         )
         long_entry = round(long_entry, price_percision)
         long_exit = round(long_exit, price_percision)
@@ -114,14 +115,14 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
             current_mark_price,
         )
         account = rest_client.account()
-        position: dict  = next(
+        position = next(
             (p for p in account["positions"] if p["symbol"] == symbol), None
         )
         if position is None:
             logger.error("Symbol not found in account positions.")
             break
-        logger.info(position)
-        direction, investment = infer_position(account, position)
+        logger.debug(position)
+        direction, investment = infer_position(position)
         position_qty = position["positionAmt"]  # Not converted in order to avoid floating point errors
         if position_qty[0] == '-':
             position_qty = position_qty[1:]
@@ -143,8 +144,8 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                         "quantity": position_qty,
                     }
                     logger.info(trade_params)
-                    logger.info(rest_client.new_order(**trade_params))
-                    logger.info("SL reached. Position closed.")
+                    rest_client.new_order(**trade_params)
+                    logger.warning("SL reached. Position closed.")
                     continue
                 # Cancel & Set new SL for current position
                 rest_client.cancel_open_orders(symbol=symbol)
@@ -156,7 +157,7 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                     "closePosition": True,
                 }
                 logger.info(trade_params)
-                logger.info(rest_client.new_order(**trade_params))
+                rest_client.new_order(**trade_params)
                 logger.info("SL updated.")
             case "SHORT":
                 # In edge cases where the price is already above SL, close the position manually.
@@ -167,8 +168,9 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                         "type": "MARKET",
                         "quantity": position_qty,
                     }
-                    logger.info(rest_client.new_order(**trade_params))
-                    logger.info("SL reached. Position closed.")
+                    logger.info(trade_params)
+                    rest_client.new_order(**trade_params)
+                    logger.warning("SL reached. Position closed.")
                     continue
                 # Cancel & Set new SL for current position
                 rest_client.cancel_open_orders(symbol=symbol)
@@ -179,7 +181,7 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                     "stopPrice": short_exit,
                     "closePosition": True,
                 }
-                logger.info(rest_client.new_order(**trade_params))
+                rest_client.new_order(**trade_params)
                 logger.info("SL updated.")
             case "NONE":
                 # Ready to enter a new position
@@ -190,9 +192,9 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                         "type": "MARKET",
                         "quantity": open_qty,
                     }
-                    logger.info(trade_params)
-                    logger.info(rest_client.new_order(**trade_params))
-                    logger.info("New LONG position opened.")
+                    logger.debug(trade_params)
+                    rest_client.new_order(**trade_params)
+                    logger.warning("New LONG position opened.")
                 elif current_mark_price < short_entry:
                     trade_params = {
                         "symbol": symbol,
@@ -200,9 +202,9 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                         "type": "MARKET",
                         "quantity": open_qty,
                     }
-                    logger.info(trade_params)
-                    logger.info(rest_client.new_order(**trade_params))
-                    logger.info("New SHORT position opened.")
+                    logger.debug(trade_params)
+                    rest_client.new_order(**trade_params)
+                    logger.warning("New SHORT position opened.")
                 else:
                     logger.info("No action.")
         time.sleep(15)
