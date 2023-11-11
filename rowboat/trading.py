@@ -13,6 +13,7 @@ import time
 import logging
 from typing import Literal, Tuple
 from decimal import Decimal
+from xmlrpc.client import Boolean
 
 from binance.um_futures import UMFutures
 from binance.error import ClientError
@@ -21,7 +22,11 @@ from .config import Configuration
 
 
 def get_entry_exit_price(
-    symbol: str, rest_client: UMFutures, entry_int: int, exit_int: int, interval: str = "1d"
+    symbol: str,
+    rest_client: UMFutures,
+    entry_int: int,
+    exit_int: int,
+    interval: str = "1d",
 ) -> Tuple[Decimal, Decimal, Decimal, Decimal]:
     "Returns (long_entry, long_exit, short_entry, short_exit)"
     bars_to_fetch = max(entry_int, exit_int) + 1  # add 1 to omit latest bar
@@ -69,11 +74,42 @@ def infer_position(position_dict) -> Tuple[Direction, Decimal]:
     return "SHORT", Decimal(position_dict["initialMargin"])
 
 
+def send_stop_market(
+    client: UMFutures, symbol: str, side: str, stop_price: Decimal, qty: Decimal
+) -> bool:
+    """
+    Send a stop market order to the exchange.
+    Returns: True if the order is triggered immediately.
+    """
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "STOP_MARKET",
+        "stopPrice": stop_price,
+        "quantity": qty,
+    }
+    try:
+        client.new_order(**params)
+    except ClientError as e:
+        if e.error_code == -2021:
+            # Order will trigger immediately
+            market_buy_params = {
+                "symbol": symbol,
+                "side": "BUY",
+                "type": "MARKET",
+                "quantity": qty,
+            }
+            client.new_order(**market_buy_params)
+            return True
+        raise e
+    return False
+
+
 # TODO: Refactor this function
 # TODO: enter_more_after_break_bars
 def follower(symbol: str, rest_client: UMFutures, config: Configuration):
     """
-    Poll the API once per 15s and make trading decisions.
+    Poll the API once per 10s and make trading decisions.
     Only LONG & SHORT actions need manual intervention. In the system it is always guarantee that position is closed
       before opening a new position in either direction.
     """
@@ -84,9 +120,7 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
     interval = config.interval
     logger = logging.getLogger(symbol)
     info = rest_client.exchange_info()
-    symbol_info = next(
-        (s for s in info["symbols"] if s["symbol"] == symbol), None
-    )
+    symbol_info = next((s for s in info["symbols"] if s["symbol"] == symbol), None)
     if symbol_info is None:
         logger.error("Symbol not found in exchange info.")
         return
@@ -97,139 +131,113 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
     rest_client.change_leverage(symbol=symbol, leverage=1)
     logger.info("Leverage set to 1x.")
     while True:
-        long_entry, long_exit, short_entry, short_exit = get_entry_exit_price(
-            symbol, rest_client, entry, exit, interval
-        )
-        long_entry = round(long_entry, price_percision)
-        long_exit = round(long_exit, price_percision)
-        short_entry = round(short_entry, price_percision)
-        short_exit = round(short_exit, price_percision)
-        current_mark_price = Decimal(
-            rest_client.mark_price(symbol=symbol)["markPrice"]
-        )
-        logger.info(
-            "Long entry: %f, long exit: %f, short entry: %f, short exit: %f, current mark price: %f",
-            long_entry,
-            long_exit,
-            short_entry,
-            short_exit,
-            current_mark_price,
-        )
-        account = rest_client.account()
-        position = next(
-            (p for p in account["positions"] if p["symbol"] == symbol), None
-        )
-        if position is None:
-            logger.error("Symbol not found in account positions.")
-            break
-        logger.debug(position)
-        direction, investment = infer_position(position)
-        position_qty = position["positionAmt"]  # Not converted in order to avoid floating point errors
-        if position_qty[0] == '-':
-            position_qty = position_qty[1:]
-        total_balance = float(account["totalWalletBalance"])
-        avaliable_balance = float(account["availableBalance"])
-        can_trade = investment < max_position * total_balance
-        each_trade_usdt = Decimal(each_trade * avaliable_balance)
-        open_qty = each_trade_usdt / current_mark_price
-        open_qty = round(open_qty, qty_percision)
-        match direction:
-            case "LONG":
-                # In edge cases where the price is already below SL, close the position manually.
-                if current_mark_price < long_exit:
-                    trade_params = {
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "positionSide": "LONG",
-                        "type": "MARKET",
-                        "quantity": position_qty,
-                    }
-                    logger.info(trade_params)
-                    rest_client.new_order(**trade_params)
-                    logger.warning("SL reached. Position closed.")
-                    continue
-                # Cancel & Set new SL for current position
-                rest_client.cancel_open_orders(symbol=symbol)
-                trade_params = {
-                    "symbol": symbol,
-                    "side": "SELL",
-                    "type": "STOP_MARKET",
-                    "stopPrice": long_exit,
-                    "closePosition": True,
-                }
-                rest_client.new_order(**trade_params)
-                logger.info("SL updated.")
-            case "SHORT":
-                # In edge cases where the price is already above SL, close the position manually.
-                if current_mark_price > short_exit:
-                    trade_params = {
-                        "symbol": symbol,
-                        "side": "BUY",
-                        "type": "MARKET",
-                        "quantity": position_qty,
-                    }
-                    logger.info(trade_params)
-                    rest_client.new_order(**trade_params)
-                    logger.warning("SL reached. Position closed.")
-                    continue
-                # Cancel & Set new SL for current position
-                rest_client.cancel_open_orders(symbol=symbol)
-                trade_params = {
-                    "symbol": symbol,
-                    "side": "BUY",
-                    "type": "STOP_MARKET",
-                    "stopPrice": short_exit,
-                    "closePosition": True,
-                }
-                rest_client.new_order(**trade_params)
-                logger.info("SL updated.")
-            case "NONE":
-                # Ready to enter a new position
-                # Cancel & Set Stop Market orders
-                rest_client.cancel_open_orders(symbol=symbol)
-                long_entry_stop_market_params = {
-                    "symbol": symbol,
-                    "side": "BUY",
-                    "type": "STOP_MARKET",
-                    "stopPrice": long_entry,
-                    "quantity": open_qty,
-                }
-                short_entry_stop_market_params = {
-                    "symbol": symbol,
-                    "side": "SELL",
-                    "type": "STOP_MARKET",
-                    "stopPrice": short_entry,
-                    "quantity": open_qty,
-                }
-                logger.debug(long_entry_stop_market_params)
-                logger.debug(short_entry_stop_market_params)
-                try:
-                    rest_client.new_order(**long_entry_stop_market_params)
-                except ClientError as e:
-                    if e.error_code == -2021:  # Order will trigger immediately
-                        market_buy_params = {
-                            "symbol": symbol,
-                            "side": "BUY",
-                            "type": "MARKET",
-                            "quantity": open_qty,
-                        }
-                        logger.info(market_buy_params)
-                        rest_client.new_order(**market_buy_params)
-                        continue
-                    logger.error(e)
-                try:
-                    rest_client.new_order(**short_entry_stop_market_params)
-                except ClientError as e:
-                    if e.error_code == -2021:
-                        market_sell_params = {
+        try:
+            long_entry, long_exit, short_entry, short_exit = get_entry_exit_price(
+                symbol, rest_client, entry, exit, interval
+            )
+            long_entry = round(long_entry, price_percision)
+            long_exit = round(long_exit, price_percision)
+            short_entry = round(short_entry, price_percision)
+            short_exit = round(short_exit, price_percision)
+            current_mark_price = Decimal(
+                rest_client.mark_price(symbol=symbol)["markPrice"]
+            )
+            logger.info(
+                "Long entry: %f, long exit: %f, short entry: %f, short exit: %f, current mark price: %f",
+                long_entry,
+                long_exit,
+                short_entry,
+                short_exit,
+                current_mark_price,
+            )
+            account = rest_client.account()
+            position = next(
+                (p for p in account["positions"] if p["symbol"] == symbol), None
+            )
+            if position is None:
+                logger.error("Symbol not found in account positions.")
+                break
+            logger.debug(position)
+            direction, investment = infer_position(position)
+            position_qty = position[
+                "positionAmt"
+            ]  # Not converted in order to avoid floating point errors
+            if position_qty[0] == "-":
+                position_qty = position_qty[1:]
+            total_balance = float(account["totalWalletBalance"])
+            avaliable_balance = float(account["availableBalance"])
+            can_trade = investment < max_position * total_balance
+            each_trade_usdt = Decimal(each_trade * avaliable_balance)
+            open_qty = each_trade_usdt / current_mark_price
+            open_qty = round(open_qty, qty_percision)
+            match direction:
+                case "LONG":
+                    try:
+                        # Cancel & Set new SL for current position
+                        rest_client.cancel_open_orders(symbol=symbol)
+                        trade_params = {
                             "symbol": symbol,
                             "side": "SELL",
-                            "type": "MARKET",
-                            "quantity": open_qty,
+                            "type": "STOP_MARKET",
+                            "stopPrice": long_exit,
+                            "closePosition": True,
                         }
-                        logger.info(market_sell_params)
-                        rest_client.new_order(**market_sell_params)
+                        rest_client.new_order(**trade_params)
+                        logger.info("SL updated.")
+                    except ClientError as e:
+                        # In edge cases where the price is already below SL, close the position manually.
+                        if e.error_code == -2021:
+                            trade_params = {
+                                "symbol": symbol,
+                                "side": "SELL",
+                                "type": "MARKET",
+                                "quantity": position_qty,
+                            }
+                            logger.info(trade_params)
+                            rest_client.new_order(**trade_params)
+                            logger.warning("SL reached. Position closed.")
+                            continue
+                case "SHORT":
+                    try:
+                        # Cancel & Set new SL for current position
+                        rest_client.cancel_open_orders(symbol=symbol)
+                        trade_params = {
+                            "symbol": symbol,
+                            "side": "BUY",
+                            "type": "STOP_MARKET",
+                            "stopPrice": short_exit,
+                            "closePosition": True,
+                        }
+                        rest_client.new_order(**trade_params)
+                        logger.info("SL updated.")
+                    except ClientError as e:
+                        # In edge cases where the price is already above SL, close the position manually.
+                        if e.error_code == -2021:
+                            trade_params = {
+                                "symbol": symbol,
+                                "side": "BUY",
+                                "type": "MARKET",
+                                "quantity": position_qty,
+                            }
+                            logger.info(trade_params)
+                            rest_client.new_order(**trade_params)
+                            logger.warning("SL reached. Position closed.")
+                            continue
+                        
+                case "NONE":
+                    # Ready to enter a new position
+                    # Cancel & Set Stop Market orders
+                    rest_client.cancel_open_orders(symbol=symbol)
+                    if send_stop_market(
+                        rest_client, symbol, "BUY", long_entry, open_qty
+                    ):
                         continue
-                    logger.error(e)
-                logger.info("Orders updated.")
-        time.sleep(15)
+                    if send_stop_market(
+                        rest_client, symbol, "SELL", short_entry, open_qty
+                    ):
+                        continue
+                    logger.info("Orders updated.")
+            time.sleep(10)
+        except Exception as e:
+            logger.exception(e)
+            time.sleep(10)
