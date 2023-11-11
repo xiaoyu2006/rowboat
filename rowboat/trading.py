@@ -78,9 +78,8 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
     entry = config.entry
     exit = config.exit
     each_trade = config.each_trade
-    max_position = config.max_per_symbol  # Portion of the total account balance
+    max_position = config.max_per_asset  # Portion of the total account balance
     interval = config.interval
-    enter_more_after_break_bars = config.enter_more_after_break_bars
     logger = logging.getLogger(symbol)
     info = rest_client.exchange_info()
     symbol_info = next(
@@ -126,10 +125,10 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
         position_qty = position["positionAmt"]  # Not converted in order to avoid floating point errors
         if position_qty[0] == '-':
             position_qty = position_qty[1:]
-        total_investment = float(account["totalWalletBalance"])
-        avaliable_investment = float(account["availableBalance"])
-        can_trade = investment < max_position * total_investment
-        each_trade_usdt = Decimal(each_trade * avaliable_investment)
+        total_balance = float(account["totalWalletBalance"])
+        avaliable_balance = float(account["availableBalance"])
+        can_trade = investment < max_position * total_balance
+        each_trade_usdt = Decimal(each_trade * avaliable_balance)
         open_qty = each_trade_usdt / current_mark_price
         open_qty = round(open_qty, qty_percision)
         match direction:
@@ -185,26 +184,25 @@ def follower(symbol: str, rest_client: UMFutures, config: Configuration):
                 logger.info("SL updated.")
             case "NONE":
                 # Ready to enter a new position
-                if current_mark_price > long_entry:
-                    trade_params = {
-                        "symbol": symbol,
-                        "side": "BUY",
-                        "type": "MARKET",
-                        "quantity": open_qty,
-                    }
-                    logger.debug(trade_params)
-                    rest_client.new_order(**trade_params)
-                    logger.warning("New LONG position opened.")
-                elif current_mark_price < short_entry:
-                    trade_params = {
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "type": "MARKET",
-                        "quantity": open_qty,
-                    }
-                    logger.debug(trade_params)
-                    rest_client.new_order(**trade_params)
-                    logger.warning("New SHORT position opened.")
-                else:
-                    logger.info("No action.")
+                # Cancel & Set Stop Market orders
+                rest_client.cancel_open_orders(symbol=symbol)
+                long_entry_stop_market_params = {
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "type": "STOP_MARKET",
+                    "stopPrice": long_entry,
+                    "quantity": open_qty,
+                }
+                short_entry_stop_market_params = {
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "type": "STOP_MARKET",
+                    "stopPrice": short_entry,
+                    "quantity": open_qty,
+                }
+                logger.debug(long_entry_stop_market_params)
+                logger.debug(short_entry_stop_market_params)
+                rest_client.new_order(**long_entry_stop_market_params)
+                rest_client.new_order(**short_entry_stop_market_params)
+                logger.info("Orders updated.")
         time.sleep(15)

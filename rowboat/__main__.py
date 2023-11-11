@@ -7,6 +7,7 @@ import sys
 import logging
 import threading
 from rich.logging import RichHandler
+from rich.traceback import install
 
 from binance.um_futures import UMFutures
 
@@ -30,8 +31,7 @@ def process_config(config_file) -> Configuration:
             "entry_bars": "20",
             "exit_bars": "10",
             "each_trade": "0.05",
-            "enter_more_after_break_bars": "8",
-            "max_per_symbol": "0.5",
+            "max_per_asset": "0.5",
             "interval": "1d",
         }
         with open(config_file, "w", encoding="utf-8") as f:
@@ -67,6 +67,7 @@ def start_trading(config: Configuration):
 
 def main():
     """Main entry point for the bot."""
+    install(show_locals=True)
     parser = argparse.ArgumentParser(description="Binance trend-following trading bot.")
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -84,3 +85,6 @@ def main():
     )
     config = process_config(args.config)
     start_trading(config)
+
+if __name__ == "__main__":
+    main()
